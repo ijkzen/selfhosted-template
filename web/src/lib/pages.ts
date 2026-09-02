@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { FileText, Waypoints } from "lucide-react";
+import { Clock, FileText, Settings, Waypoints } from "lucide-react";
 
 export interface PageConfig {
 	path: string;
@@ -26,9 +26,22 @@ export const NOTES_PAGE: PageConfig = {
 	icon: FileText,
 };
 
-export const PAGES: readonly PageConfig[] = [HOME_PAGE, NOTES_PAGE];
+export const CRON_JOBS_PAGE: PageConfig = {
+	path: "/cron-jobs",
+	titleKey: "nav.pages.cronJobs.title",
+	icon: Clock,
+};
+
+export const SETTINGS_PAGE: PageConfig = {
+	path: "/settings",
+	titleKey: "nav.pages.settings.title",
+	icon: Settings,
+};
+
+export const PAGES: readonly PageConfig[] = [HOME_PAGE, NOTES_PAGE, CRON_JOBS_PAGE, SETTINGS_PAGE];
 
 /** 侧边栏导航分组。 */
 export const NAV_GROUPS: readonly PageGroup[] = [
 	{ labelKey: "nav.groups.main", pages: [HOME_PAGE, NOTES_PAGE] },
+	{ labelKey: "nav.groups.admin", pages: [CRON_JOBS_PAGE, SETTINGS_PAGE] },
 ];

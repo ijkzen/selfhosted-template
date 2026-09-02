@@ -9,6 +9,8 @@ import { Route, Routes } from "react-router-dom";
 
 const LoginPage = lazy(() => import("./pages/login"));
 const NotesPage = lazy(() => import("./pages/notes"));
+const CronJobsPage = lazy(() => import("./pages/cron-jobs"));
+const SettingsPage = lazy(() => import("./pages/settings"));
 const NotFoundPage = lazy(() => import("./pages/not-found"));
 
 function App() {
@@ -36,6 +38,8 @@ function App() {
 						}
 					/>
 					<Route path="/notes" element={<NotesPage />} />
+					<Route path="/cron-jobs" element={<CronJobsPage />} />
+					<Route path="/settings" element={<SettingsPage />} />
 					<Route path="*" element={<NotFoundPage />} />
 				</Route>
 				<Route path="/login" element={<LoginPage />} />

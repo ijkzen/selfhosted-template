@@ -1,11 +1,11 @@
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { DataTableToolbar } from "@/components/data-table-toolbar";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import { NoteForm } from "@/components/notes/note-form";
 import { PageHeader } from "@/components/page-header";
 import { TableSkeleton } from "@/components/table-skeleton";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
 	Table,
@@ -30,7 +30,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 export default function NotesPage() {
-	const { t } = useTranslation();
+	const { t, i18n } = useTranslation();
 	const queryClient = useQueryClient();
 	const { toastSuccess, toastError } = useToastActions();
 	const [editNote, setEditNote] = useState<Note | null>(null);
@@ -79,7 +79,7 @@ export default function NotesPage() {
 	const notes = data ?? [];
 
 	return (
-		<>
+		<div className="space-y-6">
 			<PageHeader icon={FileText} title={t("notes.title")}>
 				<Button onClick={() => setShowCreate(true)}>
 					<Plus className="size-4" />
@@ -100,7 +100,7 @@ export default function NotesPage() {
 					}
 				/>
 			) : (
-				<DataTableToolbar>
+				<Card className="overflow-x-auto">
 					<Table>
 						<TableHeader>
 							<TableRow>
@@ -114,7 +114,7 @@ export default function NotesPage() {
 								<TableRow key={note.id}>
 									<TableCell className="font-medium">{note.title}</TableCell>
 									<TableCell className="hidden text-muted-foreground sm:table-cell">
-										{new Date(note.updatedAt).toLocaleString()}
+										{new Date(note.updatedAt).toLocaleString(i18n.language)}
 									</TableCell>
 									<TableCell>
 										<div className="flex gap-1">
@@ -134,7 +134,7 @@ export default function NotesPage() {
 							))}
 						</TableBody>
 					</Table>
-				</DataTableToolbar>
+				</Card>
 			)}
 
 			{showCreate && (
@@ -178,6 +178,6 @@ export default function NotesPage() {
 					if (deleteNoteId !== null) deleteMutation.mutate(deleteNoteId);
 				}}
 			/>
-		</>
+		</div>
 	);
 }

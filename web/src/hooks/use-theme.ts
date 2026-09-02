@@ -80,6 +80,13 @@ export const useTheme = create<ThemeStore>()(
 			setTheme: (newTheme, buttonRef) => {
 				if (newTheme === get().theme) return;
 
+				// 解析后的实际主题未变（如手动暗色 → 跟随系统且系统恰好为暗色）
+				// 时，只需更新偏好记录，无需重放切换动画或重写 DOM。
+				if (resolveTheme(newTheme) === resolveTheme(get().theme)) {
+					set({ theme: newTheme });
+					return;
+				}
+
 				const applyTheme = () => {
 					set({ theme: newTheme });
 					applyResolvedTheme(resolveTheme(newTheme));

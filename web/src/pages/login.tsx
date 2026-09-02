@@ -11,8 +11,9 @@ import {
 } from "@/components/ui/select";
 import { useAuthStatus, useInitAdmin, useLogin, useMe } from "@/hooks/use-auth";
 import { browserTimezone, saveInitSettings, timezoneOptions } from "@/hooks/use-init-settings";
-import { useLocale } from "@/hooks/use-locale";
+import { useChangeLocale, useLocale } from "@/hooks/use-locale";
 import { useToastActions } from "@/hooks/use-toast";
+import { LOCALES, type Locale } from "@/i18n";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -166,6 +167,7 @@ function InitForm({
 	const { t } = useTranslation();
 	const { toastError } = useToastActions();
 	const locale = useLocale((state) => state.locale);
+	const changeLocale = useChangeLocale();
 	const [timezone, setTimezone] = useState(browserTimezone());
 	const zones = useMemo(() => timezoneOptions(), []);
 	const initSchema = useMemo(() => buildInitSchema(t), [t]);
@@ -223,11 +225,18 @@ function InitForm({
 			</div>
 
 			<div className="grid gap-1.5">
-				<Label>{t("login.language")}</Label>
-				<Select value={locale} onValueChange={() => {}} disabled>
-					<SelectTrigger className="w-full">
+				<Label htmlFor="init-language">{t("login.language")}</Label>
+				<Select value={locale} onValueChange={(value) => void changeLocale(value as Locale)}>
+					<SelectTrigger id="init-language" className="w-full">
 						<SelectValue />
 					</SelectTrigger>
+					<SelectContent>
+						{LOCALES.map((l) => (
+							<SelectItem key={l} value={l}>
+								{l === "zh-CN" ? t("language.zhCN") : t("language.en")}
+							</SelectItem>
+						))}
+					</SelectContent>
 				</Select>
 				<p className="text-xs text-muted-foreground">{t("login.languageHint")}</p>
 			</div>

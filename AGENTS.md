@@ -12,6 +12,10 @@ The repository uses the five canonical triage labels. See `docs/agents/triage-la
 
 The repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
 
+### Frontend design
+
+Frontend pages follow the design rules in `web/DESIGN.md` (layout patterns, design tokens, i18n rules, named anti-patterns). Read it before adding or modifying pages.
+
 ## CI tracking
 
 - Hosting platform: GitHub Actions (`.github/workflows/ci.yml`).
