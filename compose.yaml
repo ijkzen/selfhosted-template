@@ -1,0 +1,39 @@
+# selfhosted-template Docker Compose 示例
+#
+# 使用本地构建镜像，一行启动：
+#   docker build -t selfhosted-template . && docker compose up -d
+#
+# 首次启动后访问 http://localhost:4007 完成管理员初始化。
+# 数据保存在 ./data/db 与 ./data/logs（可通过环境变量 DATA_DIR 修改）。
+#
+# 生产部署建议：
+#   - 将容器监听限制在回环地址或交由反向代理（Caddy/Nginx）处理 TLS
+#   - 用环境变量或 .env 文件注入 SECRET_KEY，切勿硬编码
+services:
+  selfhosted-template:
+    image: selfhosted-template:latest
+    container_name: selfhosted-template
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4007:4007"
+    environment:
+      BIND_ADDRESS: 0.0.0.0:4007
+      APP_ENV: prod
+      DATABASE_URL: sqlite:///config/db/app.db?mode=rwc
+      RUST_LOG: info,sqlx::query=warn
+      CRON_JOB_QUEUE_SIZE: "1000"
+      CRON_JOB_MAX_CONCURRENT: "10"
+      # cron 表达式按服务器本地时区解释（与 Dockerfile ENV 一致，运行时兜底）
+      TZ: Asia/Shanghai
+      # 敏感字段的 AES-256-GCM 加密密钥（必配，否则明文落库）
+      # 生成方式：openssl rand -hex 32
+      SECRET_KEY: ${SECRET_KEY:?请在 .env 中配置 SECRET_KEY}
+    volumes:
+      - ./data/db:/config/db
+      - ./data/logs:/config/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4007/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

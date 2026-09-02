@@ -3,4 +3,38 @@ name = "selfhosted-template"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "selfhosted_template"
+
 [dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+chrono = "0.4"
+chrono-tz = "0.10"
+croner = "3"
+hex = "0.4"
+mime_guess = "2"
+rand = "0.8"
+rust-embed = "8"
+sea-orm = { version = "2.0.0-rc.40", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs", "net"] }
+tokio-cron-scheduler = "0.15"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "catch-panic"] }
+tracing = { version = "0.1", features = ["log"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log", "json", "local-time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+temp-env = { version = "0.3", features = ["async_closure"] }
+tempfile = "3"

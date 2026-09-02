@@ -5,13 +5,40 @@ on:
   pull_request:
 
 jobs:
+  web:
+    name: web (biome + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: cd web && pnpm install --frozen-lockfile
+      - run: cd web && pnpm lint
+      - run: cd web && pnpm test run
+      - run: cd web && pnpm build
+
   rust:
     name: rust (clippy + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - run: cd web && pnpm install --frozen-lockfile && pnpm build
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test

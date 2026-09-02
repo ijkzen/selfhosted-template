@@ -1,2 +1,10 @@
 /target
 .codegraph/
+/db
+/logs
+/web/node_modules
+/web/dist
+/web/logs
+web/tsconfig.tsbuildinfo
+.DS_Store
+.env
