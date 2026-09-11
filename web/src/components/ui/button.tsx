@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
    纯图标 icon 40px / iconSm 32px（与 small 同高，图标同为 16px）；
    secondary 用 backdrop-blur(4px) + 内高光与描边（Linear 原样，仅小面积元素使用）。 */
 const buttonVariants = cva(
-	"inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[15px] font-medium outline-none transition-colors duration-[160ms] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 enabled:active:scale-[0.97] [&_svg]:pointer-events-none [&_svg]:size-[18px] [&_svg]:shrink-0",
+	"inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[15px] font-medium outline-none transition-colors [transition-duration:160ms] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 enabled:active:scale-[0.97] [&_svg]:pointer-events-none [&_svg]:size-[18px] [&_svg]:shrink-0",
 	{
 		variants: {
 			variant: {
