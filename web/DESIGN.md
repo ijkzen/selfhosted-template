@@ -12,13 +12,17 @@
 
 ## 1. Token 层（唯一事实源）
 
-所有颜色、圆角、阴影必须引用 token，**禁止硬编码 hex 色值或任意间距**。
+设计语言为 **Linear 风格**：层级靠「面色阶 + 发丝线」表达，不用大面积毛玻璃。所有颜色、圆角、阴影必须引用 token，**禁止硬编码 hex 色值或任意间距**。
 
-- 语义色：`web/src/index.css` 的 CSS 变量（shadcn 语义对 `--background`/`--foreground`、`--card`、`--muted`、`--destructive` 等），经 `tailwind.config.ts` 映射为 `bg-background`、`text-muted-foreground` 等工具类。
+- 语义色：`web/src/index.css` 的 CSS 变量（shadcn 语义对 `--background`/`--foreground`、`--card`、`--popover`、`--muted`、`--border`、`--input`、`--ring`、`--destructive` 等），经 `tailwind.config.ts` 映射为 `bg-background`、`text-muted-foreground`、`border-border` 等工具类。
+- 主题色为青绿 teal：暗色 `--primary` #14B8A6，亮色 #0F766E（两模式各自满足 AA）。`--foreground` 亮色为纯黑、暗色为近白。
+- 面色阶：canvas（`--background`）→ surface-1（`--card`）→ surface-2（`--popover`）→ accent（`--accent`）。相邻层级之间用 `--border` 发丝线分隔，不叠阴影做纵深。
 - 扩展语义色：`success` / `warning` / `info`（各自带 `-foreground`）。
-- 圆角：`--radius: 1rem` 为基础，组件内用 `rounded-lg`/`rounded-2xl`/`rounded-3xl` 阶梯，不要自造值。
+- 圆角：`tailwind.config.ts` 的固定阶梯 `xs 4 / sm 6 / md 8 / lg 12 / xl 16 / 2xl 24`（`--radius: 8px`）。按钮、输入框用 `md`；卡片、弹窗、页面级表面用 `lg`；弹层内的条目/提示用 `sm`/`md`。不要自造值。
+- 阴影：亮色用 `shadow-sm`；暗色靠面色阶与发丝线，`dark:shadow-none`。禁止 `shadow-[...]` 硬编码 rgba 阴影（按钮与侧栏等 Linear 原样规格除外）。
+- 模糊：仅在**小面积**元素上使用（如 `secondary` 按钮的 `backdrop-blur-sm`）。**禁止**在页面背景、卡片、弹窗、吸顶头等大面积表面用 `backdrop-blur` —— 滚动时每帧重算，是性能反模式。
 - 暗色模式：`class` 策略（`.dark` 选择器覆盖同一组变量），组件里**不写** `dark:` 下的具体色值来"对抗"token——先看语义色是否够用。
-- 自定义工具类：`content-surface`（卡片玻璃拟态表面）、`page-enter`（页面进入动画）、`app-header`（吸顶头栏，由 `sticky-header.css` 的 scroll-state 驱动）。新页面直接复用，不要重写表面样式。
+- 自定义工具类：`content-surface`（实色卡片表面 + 表单控件规格）、`page-enter`（页面进入动画）、`app-header`（吸顶头栏，由 `sticky-header.css` 的 scroll-state 驱动，吸顶时只切换发丝底线，不做模糊）。`glass` / `glass-strong` / `sidebar-surface` 是 surface-1 实色面的历史别名。新页面直接复用，不要重写表面样式。
 
 ## 2. 页面布局模式
 
@@ -53,7 +57,9 @@
 
 - **裸 fragment 页面**：页面顶层直接 `<>`，页头与内容零间距。→ 顶层 `space-y-6` 容器。
 - **裸表格**：`<Table>` 无 `Card` 包裹，与其他页面卡片风格断裂。→ `Card className="overflow-x-auto"`。
+- **毛玻璃表面**：卡片/弹窗/吸顶头用 `backdrop-blur-*` + 半透明 `bg-white/*`（旧 macOS 拟态残留）。→ 换 `bg-card`/`bg-popover` + `border-border` 实色面。
 - **硬编码文案**：组件里出现非 i18n 的用户可见字符串。→ `t()` + 两份 locale 补 key。
 - **浏览器 locale 日期**：`toLocaleString()` 不带语言参数。→ `toLocaleString(i18n.language)` 或 `RelativeTime`。
 - **missing key 上线**：locale 缺 key 导致界面渲染出 `common.xxx` 字样。→ 合并前 grep 用到的 key 与 locale 比对（或依赖 Translation 类型对齐）。
-- **token 逃逸**：className 里出现 hex 色值/任意间距值。→ 换语义 token 或既有阶梯。
+- **token 逃逸**：className 里出现 hex 色值 / 任意间距值 / `shadow-[...]` 硬编码 rgba 阴影。→ 换语义 token 或既有阶梯。
+- **大圆角滥调**：卡片/弹窗用 `rounded-2xl`/`rounded-3xl`。→ 按阶梯用 `rounded-lg`（卡片、弹窗）或 `rounded-md`（按钮、输入框）。

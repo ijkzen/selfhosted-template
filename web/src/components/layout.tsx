@@ -74,7 +74,7 @@ export default function AppLayout() {
 						<SidebarMenuItem>
 							<SidebarMenuButton size="lg" asChild>
 								<Link to="/">
-									<div className="flex aspect-square size-9 items-center justify-center rounded-xl bg-foreground text-background shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_4px_10px_rgba(15,23,42,0.18)] dark:bg-primary dark:text-primary-foreground">
+									<div className="flex aspect-square size-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
 										<Waypoints className="size-4" />
 									</div>
 									<div className="flex flex-col gap-0.5 leading-none">
@@ -139,13 +139,14 @@ export default function AppLayout() {
 					</div>
 				</SidebarFooter>
 			</Sidebar>
-			<SidebarInset className="overflow-hidden">
+			{/* overflow-anchor:none 防止内容变化时滚动位置跳动；不能用 overflow-hidden，否则 sticky 顶栏失效 */}
+			<SidebarInset className="[overflow-anchor:none]">
 				{/* 吸顶样式由 CSS scroll-state 查询驱动，见 sticky-header.css 的 .app-header */}
 				<header className="app-header sticky top-0 z-10 shrink-0">
 					<div className="app-header-inner flex h-14 items-center gap-4 px-6">
 						<SidebarTrigger className="-ml-2" aria-label={t("nav.appTitle")} />
 						<Separator orientation="vertical" className="h-6" />
-						<div className="flex flex-1 items-center justify-end gap-2">
+						<div className="ml-auto flex shrink-0 items-center gap-2">
 							<Button
 								variant="outline"
 								size="icon"
