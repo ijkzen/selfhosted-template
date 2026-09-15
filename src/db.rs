@@ -68,12 +68,17 @@ pub async fn connect(database_url: &str) -> Result<DatabaseConnection, DbErr> {
         use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 
         opt.map_sqlx_sqlite_opts(|opts: SqliteConnectOptions| {
+            // WAL 下事务内「先读后写」存在写升级竞态：DEFERRED 事务首语句是读，
+            // 读快照期间若其他连接提交过，首次写升级会立即报 SQLITE_BUSY_SNAPSHOT，
+            // busy_timeout 对此无效。需要多语句事务时把写放在首位，或把读移出事务
+            // （见 `cron::log_repository::prune_old_runs` 的取数顺序）；回归测试必须
+            // 用文件库——内存库没有 WAL 语义。
             opts.journal_mode(SqliteJournalMode::Wal)
                 .synchronous(SqliteSynchronous::Normal)
                 // SQLite 写操作是串行的，过长的 busy_timeout 会掩盖锁竞争。
                 .busy_timeout(Duration::from_secs(5))
                 .foreign_keys(true)
-                // 约 256 MB 页缓存，提升读性能。
+                // -64000 为 KiB 单位，约 62.5 MiB/连接页缓存，提升读性能。
                 .pragma("cache_size", "-64000")
                 // 临时表/排序全部走内存。
                 .pragma("temp_store", "2")
@@ -150,25 +155,23 @@ pub(crate) async fn migrate(db: &DatabaseConnection) -> Result<bool, DbErr> {
     .await?;
 
     // Migration 2: 定时任务的分组与软删字段（历史库兜底；新库建表已带这两列）。
-    let group_exists = column_exists(db, "cron_jobs", "group").await?;
-    let is_deleted_exists = column_exists(db, "cron_jobs", "is_deleted").await?;
-
-    let mut migration_2_statements: Vec<&str> = Vec::new();
-    if !group_exists {
-        migration_2_statements
-            .push("ALTER TABLE cron_jobs ADD COLUMN \"group\" TEXT NOT NULL DEFAULT 'other'");
-    }
-    if !is_deleted_exists {
-        migration_2_statements
-            .push("ALTER TABLE cron_jobs ADD COLUMN \"is_deleted\" BOOLEAN NOT NULL DEFAULT 0");
-    }
-
-    if !migration_2_statements.is_empty() {
-        changed |= ensure_migration(db, 2, &migration_2_statements).await?;
-    } else {
-        // Columns already exist; record version 2 without re-running ALTER.
-        changed |= ensure_migration(db, 2, &["SELECT 1"]).await?;
-    }
+    changed |= ensure_columns(
+        db,
+        2,
+        &[
+            (
+                "cron_jobs",
+                "group",
+                "ALTER TABLE cron_jobs ADD COLUMN \"group\" TEXT NOT NULL DEFAULT 'other'",
+            ),
+            (
+                "cron_jobs",
+                "is_deleted",
+                "ALTER TABLE cron_jobs ADD COLUMN \"is_deleted\" BOOLEAN NOT NULL DEFAULT 0",
+            ),
+        ],
+    )
+    .await?;
 
     // Migration 3 originally created a redundant non-unique index on `name`.
     // It is now a placeholder so existing databases skip it; migration 4 drops
@@ -184,6 +187,19 @@ pub(crate) async fn migrate(db: &DatabaseConnection) -> Result<bool, DbErr> {
         &[
             "CREATE INDEX IF NOT EXISTS idx_cron_job_runs_job_name ON cron_job_runs (job_name)",
             "CREATE INDEX IF NOT EXISTS idx_cron_job_logs_run_id ON cron_job_logs (run_id)",
+        ],
+    )
+    .await?;
+
+    // Migration 6: cron_job_logs 覆盖索引 (run_id, seq) —— 单 run 日志查询按
+    // run_id 过滤 + seq 排序，复合索引直接覆盖；左前缀同时替代原单列
+    // idx_cron_job_logs_run_id，故删除后者减少写放大。
+    changed |= ensure_migration(
+        db,
+        6,
+        &[
+            "CREATE INDEX IF NOT EXISTS idx_cron_job_logs_run_seq ON cron_job_logs (run_id, seq)",
+            "DROP INDEX IF EXISTS idx_cron_job_logs_run_id",
         ],
     )
     .await?;
@@ -213,8 +229,34 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> Re
 }
 
 // Non-idempotent ALTER TABLE statements are acceptable here because the
-// in-transaction migration guard prevents concurrent execution, and the
-// schema_migrations table is created before any versioned migration runs.
+// in-transaction version guard turns a concurrent second migrator into a
+// fail-fast error (DDL rolls back with the transaction; the DB is never left
+// half-migrated) rather than silently double-applying. It does NOT serialize
+// concurrent first-start migrations -- deployments run a single container at a
+// time. The schema_migrations table is created before any versioned migration
+// runs.
+
+/// 缺失则补列的迁移样板：对 `(table, column)` 逐列检查，缺列时收集其 ADD 语句，
+/// 最后以单次 `ensure_migration(version, stmts)` 执行（版本守卫保证同一版本只跑
+/// 一次）。无缺列时仍写入版本记录（`SELECT 1`），幂等且不吞后续迁移。
+async fn ensure_columns(
+    db: &DatabaseConnection,
+    version: i32,
+    columns: &[(&str, &str, &str)],
+) -> Result<bool, DbErr> {
+    let mut statements: Vec<&str> = Vec::new();
+    for (table, column, add_ddl) in columns {
+        if !column_exists(db, table, column).await? {
+            statements.push(add_ddl);
+        }
+    }
+    if statements.is_empty() {
+        ensure_migration(db, version, &["SELECT 1"]).await
+    } else {
+        ensure_migration(db, version, &statements).await
+    }
+}
+
 async fn ensure_migration(
     db: &DatabaseConnection,
     version: i32,
@@ -326,5 +368,43 @@ mod tests {
         // 二次 migrate 幂等：不重复应用版本化迁移。
         let changed = migrate(&db).await.unwrap();
         assert!(!changed, "second migrate should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn ensure_columns_adds_all_missing_columns_in_one_version() {
+        use sea_orm::ConnectionTrait;
+        let db = connect("sqlite::memory:").await.unwrap();
+
+        db.execute_unprepared("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+
+        // 同一版本内两列都缺：必须一次补齐——若分两次调用同版本，第二次会被
+        // 版本守卫吞掉，导致第二列永久缺失。
+        assert!(
+            ensure_columns(
+                &db,
+                900,
+                &[
+                    ("probe", "alpha", "ALTER TABLE probe ADD COLUMN alpha TEXT"),
+                    ("probe", "beta", "ALTER TABLE probe ADD COLUMN beta INTEGER"),
+                ],
+            )
+            .await
+            .unwrap()
+        );
+        assert!(column_exists(&db, "probe", "alpha").await.unwrap());
+        assert!(column_exists(&db, "probe", "beta").await.unwrap());
+
+        // 重复调用：版本已记录，不再执行也不报错。
+        assert!(
+            !ensure_columns(
+                &db,
+                900,
+                &[("probe", "alpha", "ALTER TABLE probe ADD COLUMN alpha TEXT")],
+            )
+            .await
+            .unwrap()
+        );
     }
 }

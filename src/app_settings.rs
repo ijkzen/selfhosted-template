@@ -69,6 +69,11 @@ impl AppSettings {
     /// 从 setting 表加载 language / timezone 两行（缺失时用默认值），并幂等
     /// 写入种子行，保证「空表起步」的库也有这两行可被 `PUT` 更新。
     pub async fn load_from_db(db: &DatabaseConnection) -> anyhow::Result<Self> {
+        // 种子行先于解析插入——否则首启时进程内 timezone 解析到 None（种子行
+        // 尚未写入），cron 链路回退服务器本地时区，而库里已写入默认时区，两口径
+        // 分叉一个启动周期。种子幂等，重复调用无副作用。
+        Self::seed_rows(db).await?;
+
         let mut language = Lang::default();
         let mut timezone: Option<chrono_tz::Tz> = None;
 
@@ -88,15 +93,13 @@ impl AppSettings {
 
         *LANG_SYNC.lock().unwrap() = language;
 
-        let settings = Self {
+        Ok(Self {
             inner: Arc::new(RwLock::new(AppSettingsInner { language, timezone })),
-        };
-        settings.ensure_seed_rows(db).await?;
-        Ok(settings)
+        })
     }
 
     /// 幂等插入 language / timezone 种子行（已存在则跳过）。
-    async fn ensure_seed_rows(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
+    async fn seed_rows(db: &DatabaseConnection) -> anyhow::Result<()> {
         for (key, value, setting_type) in [
             (
                 KEY_LANGUAGE,
