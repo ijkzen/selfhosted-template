@@ -65,3 +65,18 @@ if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
 	Element.prototype.scrollIntoView = () => {};
 }
+
+// jsdom 未实现 window.matchMedia（use-mobile / 响应式组件用），补最小可用桩：
+// 默认不匹配（桌面语义），监听器为空实现。
+if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
+	window.matchMedia = ((query: string) => ({
+		matches: false,
+		media: query,
+		onchange: null,
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		addListener: () => {},
+		removeListener: () => {},
+		dispatchEvent: () => false,
+	})) as unknown as typeof window.matchMedia;
+}

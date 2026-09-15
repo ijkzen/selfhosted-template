@@ -14,6 +14,7 @@ import { browserTimezone, saveInitSettings, timezoneOptions } from "@/hooks/use-
 import { useChangeLocale, useLocale } from "@/hooks/use-locale";
 import { useToastActions } from "@/hooks/use-toast";
 import { LOCALES, type Locale } from "@/i18n";
+import { readStoredRedirectFrom } from "@/lib/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Settings, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -50,7 +51,10 @@ export default function LoginPage() {
 	const location = useLocation();
 	const navigate = useNavigate();
 	const { toastError } = useToastActions();
-	const from = (location.state as { from?: string } | null)?.from ?? "/";
+	// 会话过期由 HTTP 层整页跳转（location.assign）过来时没有 router state，
+	// 从 sessionStorage 恢复来源路径；正常跳转仍优先用 state.from。
+	const stateFrom = (location.state as { from?: string } | null)?.from;
+	const from = stateFrom ?? readStoredRedirectFrom() ?? "/";
 
 	const { data: me, isLoading: meLoading } = useMe();
 	const { data: status, isLoading: statusLoading } = useAuthStatus();

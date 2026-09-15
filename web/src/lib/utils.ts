@@ -13,10 +13,12 @@ function trimTrailingZeros(text: string): string {
 
 /** 超过 maxLength 时按码点保留首尾、中间以 … 省略（如 "阿里云・deepseek-chat" → "阿里云…eepseek-chat"）。 */
 export function middleEllipsis(text: string, maxLength: number): string {
-	if (text.length <= maxLength) {
+	const chars = Array.from(text);
+	// 守卫与截断同按码点计数——用 UTF-16 length 判断时，含代理对的文本
+	// （emoji 等）会被判为未超长而原样返回，长度实际超出预算。
+	if (chars.length <= maxLength) {
 		return text;
 	}
-	const chars = Array.from(text);
 	const ellipsis = "…";
 	const keep = Math.max(0, maxLength - ellipsis.length);
 	const head = Math.ceil(keep / 2);

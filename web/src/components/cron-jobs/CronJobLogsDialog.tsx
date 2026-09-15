@@ -190,6 +190,21 @@ export function CronJobLogsDialog({ job, open, onOpenChange }: CronJobLogsDialog
 							{stream.connection === "reconnecting" && (
 								<span className="text-xs text-warning">{t("cronJobs.reconnecting")}</span>
 							)}
+							{/* 退避重连达上限后停止静默转圈，提示用户手动刷新（会话过期等）。 */}
+							{stream.reconnectExhausted && (
+								<span className="flex items-center gap-2 text-xs text-destructive">
+									{t("cronJobs.reconnectFailed")}
+									<Button
+										type="button"
+										variant="outline"
+										size="sm"
+										className="h-6 px-2 text-xs"
+										onClick={() => window.location.reload()}
+									>
+										{t("common.refresh")}
+									</Button>
+								</span>
+							)}
 						</div>
 						<div
 							ref={liveRef}

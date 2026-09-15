@@ -31,11 +31,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLogout, useMe } from "@/hooks/use-auth";
 import { fetchHealth } from "@/lib/api";
 import { NAV_GROUPS } from "@/lib/pages";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { cn } from "@/lib/utils";
+import { type Query, useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, LogOut, RefreshCw, Waypoints } from "lucide-react";
 import { Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
+
+/** 页面刷新排除的布局级键：登录态清了会触发路由守卫全屏验证（失败即踢回登录页），版本号重取无意义。 */
+const REFRESH_EXCLUDED_KEYS = ["auth", "health"];
+
+/** 刷新范围与按钮忙碌态的同一判定：两个调用点必须一致，故共用此谓词。 */
+function isRefreshableQuery(query: Query): boolean {
+	return !REFRESH_EXCLUDED_KEYS.includes(String(query.queryKey[0]));
+}
 
 export default function AppLayout() {
 	const { t } = useTranslation();
@@ -44,6 +53,7 @@ export default function AppLayout() {
 	const queryClient = useQueryClient();
 	const { data: me } = useMe();
 	const logout = useLogout();
+	const isRefreshing = useIsFetching({ predicate: isRefreshableQuery }) > 0;
 	// 版本号动态读取（/api/healthz），发布新版无需改前端代码；取不到时只显示应用名。
 	const { data: health } = useQuery({
 		queryKey: ["health"],
@@ -147,14 +157,18 @@ export default function AppLayout() {
 						<SidebarTrigger className="-ml-2" aria-label={t("nav.appTitle")} />
 						<Separator orientation="vertical" className="h-6" />
 						<div className="ml-auto flex shrink-0 items-center gap-2">
+							{/* 页面刷新：清空除布局级键外的查询缓存并立即重取当前页面。
+							    用 resetQueries（先清数据再重取 active，忽略 staleTime）而非
+							    removeQueries（active 不自动重取）或 invalidateQueries（不删数据）。 */}
 							<Button
 								variant="outline"
 								size="icon"
 								title={t("common.refresh")}
 								aria-label={t("common.refresh")}
-								onClick={() => queryClient.invalidateQueries()}
+								disabled={isRefreshing}
+								onClick={() => queryClient.resetQueries({ predicate: isRefreshableQuery })}
 							>
-								<RefreshCw className="size-4" />
+								<RefreshCw className={cn("size-4", isRefreshing && "animate-spin")} />
 							</Button>
 							<LocaleToggle />
 							<ThemeToggle />
