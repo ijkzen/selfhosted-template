@@ -155,6 +155,21 @@ worker 测试的固定预算 `sleep(300ms)` 全部换成 `wait_for_run` 轮询 h
 
 **E5 工作目录与钩子**：`.gitignore` 补 `/.worktrees`、`/.zcode/plans`、`/.zcode/tmp`；pre-commit 落为版本控制的 `scripts/pre-commit.sh`（检查项与 CI 对齐，含 `cargo fmt --check` 与 `cargo test --all-targets`），并把 `.git/hooks/pre-commit` 换成指向它的软链，本地与 CI 从此同源。
 
+## 提交记录
+
+按批次分 6 次提交（每次提交前跑完整门禁）：
+
+| 提交 | 批次 | 内容 |
+|------|------|------|
+| `3c1703e` | B（除 B1） | 后端安全与正确性：初始化原子化、掩码按字符计数、鉴权边界 |
+| `11c30cc` | C + B1 | cron 引擎可靠性对齐与优雅关停收尾上限 |
+| `e6f9f95` | D | 设置种子顺序、迁移样板与未知 API 路径 404 |
+| `f43c59d` | F | 前端错误链路保留错误身份并统一用户可见文案 |
+| `2cdc6f2` | FE | i18n 首帧与热切换、SSE 退避重连、页面刷新语义 |
+| `e3fc092` | E | CI fmt 门禁与工程文档（README/使用手册/审计规范/pre-commit 脚本） |
+
+**B1 与批次 C 合并提交的原因**：cron 日志事件的 `Arc` 化同时改动 `lib.rs`、`state.rs`、`log_capture.rs`、`worker.rs`、`routes/cron_jobs.rs`，而 B1 的优雅关停也落在 `lib.rs`——两者无法拆到不同提交而不让中间提交无法编译。
+
 ## 整体验证
 
 全部批次完成后按仓库门禁跑了一遍，并补做真实运行冒烟（内存库测试覆盖不到迁移与关停）：
