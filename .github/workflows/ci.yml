@@ -24,7 +24,7 @@ jobs:
       - run: cd web && pnpm build
 
   rust:
-    name: rust (clippy + test)
+    name: rust (fmt + clippy + test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -38,7 +38,9 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cd web && pnpm install --frozen-lockfile && pnpm build
+      - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
+      - run: cargo test --all-targets

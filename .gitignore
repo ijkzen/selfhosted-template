@@ -1,5 +1,8 @@
 /target
 .codegraph/
+/.worktrees
+/.zcode/plans
+/.zcode/tmp
 /db
 /logs
 /web/node_modules
