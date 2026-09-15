@@ -112,9 +112,11 @@ pub fn mask(plain: &str) -> String {
     if plain.is_empty() {
         return String::new();
     }
-    let bytes = plain.as_bytes();
-    if bytes.len() <= 7 {
-        return "*".repeat(bytes.len());
+    // 按字符计数：若用字节数判长、字符数切片，多字节内容（如 4 个汉字 = 12 字节）
+    // 会通过长度检查从而被完整回显。
+    let len = plain.chars().count();
+    if len <= 7 {
+        return "*".repeat(len);
     }
     let head: String = plain.chars().take(3).collect();
     let tail: String = plain
@@ -231,5 +233,12 @@ mod tests {
         assert_eq!(mask("abc"), "***");
         assert_eq!(mask("1234567"), "*******");
         assert_eq!(mask("12345678"), "123****5678");
+    }
+
+    #[test]
+    fn mask_counts_characters_not_bytes() {
+        // 多字节内容按字符计长：4 个汉字（12 字节）不得因字节数超标而回显。
+        assert_eq!(mask("密文测试"), "****");
+        assert_eq!(mask("一二三四五六七八"), "一二三****五六七八");
     }
 }

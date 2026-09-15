@@ -7,11 +7,14 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
     routing::{get, post},
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    PaginatorTrait, QueryFilter, Set, Statement,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    self, AuthedUser, SESSION_COOKIE, clear_session_cookie, create_session,
+    self, AuthedUser, SESSION_COOKIE, SESSION_TTL_SECS, clear_session_cookie, create_session,
     delete_expired_sessions, hash_password, revoke_other_sessions, revoke_session, session_user,
     verify_password,
 };
@@ -99,43 +102,77 @@ async fn init(State(state): State<AppState>, Json(req): Json<CredentialsRequest>
         return response::bad_request::<()>(msg).into_response();
     }
 
-    match Entity::find().count(&state.db).await {
-        Ok(count) if count > 0 => {
-            let msg = lang.tr(
-                "系统已初始化，请直接登录",
-                "system is already initialized, please log in",
-            );
-            return response::bad_request::<()>(msg).into_response();
-        }
-        Ok(_) => {}
-        Err(e) => return response::db_error::<()>(e.to_string()).into_response(),
-    }
-
     let password_hash = match hash_password(&req.password) {
         Ok(hash) => hash,
         Err(e) => return response::internal_error::<()>(e.to_string()).into_response(),
     };
 
+    // check-then-act 并发双初始化（不同用户名）可各建一个用户，破坏单用户假设。
+    // 改为原子「表空才插入」单语句——条件在写入路径内部求值，并发下数据库自己
+    // 保证只有一个成功（不再有先读后写的竞态窗口）。
     let now = chrono::Utc::now();
-    let active = ActiveModel {
-        username: Set(username.to_string()),
-        password_hash: Set(password_hash),
-        created_at: Set(now),
-        updated_at: Set(now),
-        ..Default::default()
+    let inserted = state
+        .db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO user (username, password_hash, created_at, updated_at) \
+             SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM user)",
+            [
+                username.to_string().into(),
+                password_hash.into(),
+                now.into(),
+                now.into(),
+            ],
+        ))
+        .await
+        .map(|res| res.rows_affected())
+        .unwrap_or(0);
+
+    if inserted == 0 {
+        // 插入被条件挡下：表非空（已初始化）或用户名冲突，按实际状态取文案。
+        let occupied = Entity::find()
+            .count(&state.db)
+            .await
+            .map(|n| n > 0)
+            .unwrap_or(true);
+        let msg = if occupied && !user_exists(&state.db, username).await {
+            lang.tr(
+                "系统已初始化，请直接登录",
+                "system is already initialized, please log in",
+            )
+        } else {
+            lang.tr("同名用户已存在", "a user with the same name already exists")
+        };
+        return response::bad_request::<()>(msg).into_response();
+    }
+
+    // 取回刚插入的行（id 由自增生成）。
+    let model = match Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return response::db_error::<()>("用户创建后读取失败".to_string()).into_response();
+        }
+        Err(e) => return response::db_error::<()>(e.to_string()).into_response(),
     };
 
-    match active.insert(&state.db).await {
-        Ok(model) => match create_session(&state.db, model.id).await {
-            Ok((token, expires_at)) => login_response(&model.username, &token, expires_at),
-            Err(e) => response::internal_error::<()>(e.to_string()).into_response(),
-        },
-        Err(e) if is_unique_violation(&e) => response::bad_request::<()>(
-            lang.tr("同名用户已存在", "a user with the same name already exists"),
-        )
-        .into_response(),
-        Err(e) => response::db_error::<()>(e.to_string()).into_response(),
+    match create_session(&state.db, model.id).await {
+        Ok((token, expires_at)) => login_response(&model.username, &token, expires_at),
+        Err(e) => response::internal_error::<()>(e.to_string()).into_response(),
     }
+}
+
+/// 用户名是否已占用（init 错误文案判定用）。
+async fn user_exists(db: &DatabaseConnection, username: &str) -> bool {
+    Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .count(db)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false)
 }
 
 /// POST /api/auth/login：校验用户名密码，建立会话。
@@ -184,7 +221,7 @@ fn login_response(
 ) -> AxumResponse {
     let max_age = (expires_at - chrono::Utc::now())
         .num_seconds()
-        .clamp(0, 7 * 24 * 3600);
+        .clamp(0, SESSION_TTL_SECS);
     let cookie =
         format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
     (
@@ -260,9 +297,4 @@ async fn change_password(
     revoke_other_sessions(&state.db, user_id, &token).await;
 
     (StatusCode::OK, Json(Response::success(()))).into_response()
-}
-
-/// SQLite 唯一约束冲突。
-fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
-    err.to_string().contains("UNIQUE constraint failed")
 }

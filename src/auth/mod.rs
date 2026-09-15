@@ -170,20 +170,24 @@ async fn current_lang() -> Lang {
 }
 
 /// 请求拦截：
-/// - `/api/*`（除 `/api/auth/status|login|init`、`/api/healthz`）要求有效会话 Cookie，
-///   认证后的用户信息注入 extensions（`AuthedUser`）；
+/// - `/api/*`（除 `/api/auth/status|login|init|logout`、`/api/healthz`）要求有效会话
+///   Cookie，认证后的用户信息注入 extensions（`AuthedUser`）；
 /// - 其余路径（SPA 静态资源）直接放行。
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> AxumResponse {
-    let path = req.uri().path();
+    // 尾斜杠归一：`/api/auth/status/` 不应落入「需登录」分支。
+    let path = req.uri().path().trim_end_matches('/');
 
     let auth_public = path == "/api/healthz"
         || path == "/api/auth/status"
         || path == "/api/auth/login"
-        || path == "/api/auth/init";
+        || path == "/api/auth/init"
+        // logout 幂等公开：会话已过期时也应能清 cookie（handler 自行容忍无
+        // cookie/无效会话），否则先被 401 拦在门外。
+        || path == "/api/auth/logout";
     if auth_public {
         return next.run(req).await;
     }
