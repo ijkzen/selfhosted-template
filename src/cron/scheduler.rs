@@ -9,7 +9,8 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 
 use crate::app_settings::AppSettings;
 use crate::cron::parser::{
-    ScheduleType, compute_frequency_secs_tz, compute_next_run_tz, parse_expression,
+    ScheduleType, compute_frequency_secs_tz, compute_next_run_from_scheduled_at_tz,
+    compute_next_run_tz, parse_expression,
 };
 use crate::cron::repository::{CronJobRepository, JobDefinition};
 use crate::cron::worker::JobInvocation;
@@ -481,12 +482,16 @@ impl SchedulerRuntime {
         repo: &R,
         name: &str,
     ) -> Result<(), SchedulerError> {
-        let original_enabled = {
+        // 未加载进调度器的任务（handler 未注册被跳过）也应可删除（11-07）：
+        // 内存 miss 退化为纯 DB 软删——否则这类行在 API 里不可见、不可更新
+        // 也不可删除，永远残留在库里。
+        let loaded_enabled = {
             let jobs = self.jobs.read().await;
-            let entry = jobs
-                .get(name)
-                .ok_or_else(|| SchedulerError::JobNotFound(name.to_string()))?;
-            entry.enabled
+            jobs.get(name).map(|entry| entry.enabled)
+        };
+        let Some(original_enabled) = loaded_enabled else {
+            repo.soft_delete(name).await?;
+            return Ok(());
         };
 
         repo.soft_delete(name).await?;
@@ -508,7 +513,8 @@ impl SchedulerRuntime {
     pub async fn list_jobs(&self) -> Vec<JobInfo> {
         let jobs = self.jobs.read().await;
         let tz = self.settings.timezone().await;
-        jobs.values()
+        let mut result: Vec<JobInfo> = jobs
+            .values()
             .map(|e| JobInfo {
                 name: e.name.clone(),
                 title: e.title.clone(),
@@ -521,7 +527,11 @@ impl SchedulerRuntime {
                 group: e.group.clone(),
                 frequency_secs: compute_frequency_secs_tz(&e.expression, tz),
             })
-            .collect()
+            .collect();
+        // 内存 map 是 HashMap，遍历顺序随进程随机种子变化；不排序会让列表在
+        // 重启或增删任务后自行跳动。
+        result.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.name.cmp(&b.name)));
+        result
     }
 
     pub async fn list_jobs_detailed<R: CronJobRepository>(
@@ -718,6 +728,41 @@ async fn skip_missed_run<R: CronJobRepository>(
             config.name,
             e
         );
+    }
+}
+
+/// 单次执行结束后的计划推进（next_run_at / last_run_at 回写的唯一实现）。
+///
+/// next_run_at 从 `scheduled_at` 锚定重算；若任务超时/排队导致算出的时间已
+/// 过期，则从 now 重算，保证展示的 next run 恒在未来。last_run_at = now。
+/// 手动「立即执行」与调度触发同通道同语义。worker 只报告事实
+/// （name / expression / scheduled_at / tz），不自行计算或回写；
+/// 路由在表达式变更时也经 `compute_next_run_tz` 同一口径重算。
+pub async fn on_run_finished<R: CronJobRepository>(
+    repo: &R,
+    name: &str,
+    expression: &str,
+    scheduled_at: chrono::DateTime<Utc>,
+    tz: Option<chrono_tz::Tz>,
+) {
+    let now = Utc::now();
+    let next = compute_next_run_from_scheduled_at_tz(expression, scheduled_at, tz).unwrap_or(now);
+    // If the job overran its interval (or waited in the queue), the time
+    // computed from scheduled_at is already in the past; recompute from now
+    // so the displayed next run always lies in the future.
+    let next = if next <= now {
+        compute_next_run_from_scheduled_at_tz(expression, now, tz).unwrap_or(next)
+    } else {
+        next
+    };
+    match repo.update_run_times(name, now, next).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("Job '{}' not found when updating run times", name)
+        }
+        Err(e) => {
+            tracing::error!("Failed to update run times for '{}': {}", name, e)
+        }
     }
 }
 

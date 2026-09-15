@@ -2,13 +2,13 @@
 //!
 //! worker 执行 handler 时会创建一个带 `job_name` / `run_id` 字段的 span，
 //! 本模块的 [`JobLogLayer`] 从全局 tracing 事件流中捕获该 span 内的日志事件，
-//! 通过 std 同步通道转发给 lib.rs 的桥接任务，再进入 tokio broadcast 供
-//! worker（落库）与 SSE（实时推送）订阅。span 外的普通日志（启动日志、
-//! HTTP 访问日志等）不会被捕获。
+//! 直接发送到 tokio broadcast 供 worker（落库）与 SSE（实时推送）订阅。
+//! span 外的普通日志（启动日志、HTTP 访问日志等）不会被捕获。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::broadcast::Sender;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -25,6 +25,10 @@ const MAX_LOG_MESSAGE_CHARS: usize = 4096;
 const JOB_SPAN_TARGET: &str = "cron_job_log";
 
 /// 通过广播通道发布的任务日志事件，worker 与 SSE 各自按 `job_name`/`run_id` 过滤。
+///
+/// 通道载荷为 `Arc<JobLogEvent>`：on_event 每事件只分配一次，broadcast 对
+/// 每个订阅者克隆的是 Arc（1 个 worker 消费者 + 每个 SSE 连接），避免整条
+/// 事件体的逐订阅者深克隆（M2）。
 ///
 /// `kind` 取值：
 /// - `log`：handler 内捕获的一条日志（携带 `seq`/`level`/`message`）
@@ -88,17 +92,22 @@ impl JobLogEvent {
 
 /// 捕获 cron job span 内日志事件的 [`Layer`]。
 ///
-/// `on_event` 是同步回调，不能 await，因此使用 std 同步通道；
-/// lib.rs 中的桥接任务负责把事件转发到 tokio broadcast，供 worker
-/// 与 SSE 按 `job_name`（+ `run_id`）过滤订阅。
+/// `on_event` 是同步回调，broadcast 的 `send` 同步且不阻塞（通道满丢弃
+/// 最旧事件、无订阅者返回 Err），可直接调用；worker 与 SSE 按 `job_name`
+/// （+ `run_id`）过滤订阅。直连 broadcast 保证事件在 `tracing::info!`
+/// 返回前已入队，handler 结束后 worker 的 drain 不会漏收。
+///
+/// 每条 log 事件在捕获侧分配 per-span 单调 `seq`（与 worker 落库序同源：
+/// 广播 FIFO 保序），SSE 客户端据此对「先订阅后快照」的重叠窗口去重
+///（前端 `data.seq <= 尾 seq` 丢弃）。
 pub struct JobLogLayer {
-    sender: Sender<JobLogEvent>,
-    /// span id -> (job_name, run_id)，只登记带归属字段的任务 span。
-    job_spans: Mutex<HashMap<Id, (String, String)>>,
+    sender: Sender<Arc<JobLogEvent>>,
+    /// span id -> (job_name, run_id, 下一个待分配的 seq)，只登记带归属字段的任务 span。
+    job_spans: Mutex<HashMap<Id, (String, String, i32)>>,
 }
 
 impl JobLogLayer {
-    pub fn new(sender: Sender<JobLogEvent>) -> Self {
+    pub fn new(sender: Sender<Arc<JobLogEvent>>) -> Self {
         Self {
             sender,
             job_spans: Mutex::new(HashMap::new()),
@@ -120,7 +129,7 @@ where
             self.job_spans
                 .lock()
                 .unwrap()
-                .insert(id.clone(), (job_name, run_id));
+                .insert(id.clone(), (job_name, run_id, 1));
         }
     }
 
@@ -129,8 +138,9 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        // 事件必须发生在一个带归属字段的任务 span 内才捕获。
-        let Some((job_name, run_id)) = self.lookup_owner(event, &ctx) else {
+        // 事件必须发生在一个带归属字段的任务 span 内才捕获；seq 在同一把锁内
+        // 自增（broadcast FIFO 保序，worker 落库 seq 与之一致）。
+        let Some((job_name, run_id, seq)) = self.owning_span_next_seq(event, &ctx) else {
             return;
         };
 
@@ -138,39 +148,41 @@ where
         event.record(&mut recorder);
         let message = trim_and_limit(recorder.message.as_deref().unwrap_or_default());
 
-        // 无界 std 通道的 send 同步且不阻塞；接收端（桥接任务）关闭后事件
-        // 静默丢弃，此时没有任何订阅者，不影响运行。
-        let _ = self.sender.send(JobLogEvent {
+        // 无订阅者时 send 返回 Err（事件静默丢弃）；通道满时丢弃最旧事件。
+        let _ = self.sender.send(Arc::new(JobLogEvent {
             kind: "log".to_string(),
             job_name,
             run_id,
-            seq: None,
+            seq: Some(seq),
             level: Some(event.metadata().level().to_string()),
             message: Some(message),
             status: None,
             truncated: None,
             ts: Utc::now().to_rfc3339(),
-        });
+        }));
     }
 }
 
 impl JobLogLayer {
-    /// 从事件的实际上下文 span 链（内向外）查找最近的任务 span 归属。
+    /// 从事件的实际上下文 span 链（内向外）查找最近的任务 span 归属并取下一个 seq。
     ///
     /// 注意：`event.parent()` 只返回显式指定的 parent，contextual 事件（宏
     /// 默认形式）返回 None，必须用 `ctx.event_scope` 解析当前 span 链。
-    fn lookup_owner<'a, S>(
+    fn owning_span_next_seq<S>(
         &self,
         event: &Event<'_>,
-        ctx: &Context<'a, S>,
-    ) -> Option<(String, String)>
+        ctx: &Context<'_, S>,
+    ) -> Option<(String, String, i32)>
     where
-        S: Subscriber + for<'b> LookupSpan<'b>,
+        S: Subscriber + for<'a> LookupSpan<'a>,
     {
         let scope = ctx.event_scope(event)?;
+        let mut spans = self.job_spans.lock().unwrap();
         for span in scope {
-            if let Some(owner) = self.job_spans.lock().unwrap().get(&span.id()) {
-                return Some(owner.clone());
+            if let Some((job_name, run_id, next_seq)) = spans.get_mut(&span.id()) {
+                let seq = *next_seq;
+                *next_seq += 1;
+                return Some((job_name.clone(), run_id.clone(), seq));
             }
         }
         None
@@ -240,7 +252,9 @@ impl Visit for MessageRecorder {
     }
 }
 
-fn trim_and_limit(message: &str) -> String {
+/// 单条日志消息的字符上限（4096）截断，捕获侧与 worker 合成消息共用
+/// （08-03：合成消息此前绕过截断，超长 handler 错误串可直接落库超长行）。
+pub(crate) fn trim_and_limit(message: &str) -> String {
     let trimmed = message.trim();
     let mut chars = trimmed.chars();
     let limited: String = chars.by_ref().take(MAX_LOG_MESSAGE_CHARS).collect();
@@ -259,9 +273,8 @@ pub(crate) static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Receiver;
-
     use super::*;
+    use tokio::sync::broadcast::error::TryRecvError;
     use tracing_subscriber::Registry;
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -270,8 +283,11 @@ mod tests {
     fn capture_events(
         job_name: &str,
         run_id: &str,
-    ) -> (Receiver<JobLogEvent>, std::sync::mpsc::Sender<JobLogEvent>) {
-        let (tx, rx) = std::sync::mpsc::channel();
+    ) -> (
+        tokio::sync::broadcast::Receiver<Arc<JobLogEvent>>,
+        Sender<Arc<JobLogEvent>>,
+    ) {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
         // 额外保留一个 Sender，避免 subscriber 销毁后 channel 断连。
         let keep_alive = tx.clone();
         let subscriber = Registry::default().with(JobLogLayer::new(tx));
@@ -293,30 +309,58 @@ mod tests {
     #[test]
     fn test_captures_events_inside_job_span() {
         let _guard = SUBSCRIBER_LOCK.lock().unwrap();
-        let (rx, _keep_alive) = capture_events("job_a", "run_1");
+        let (mut rx, _keep_alive) = capture_events("job_a", "run_1");
 
-        let first = rx.recv().unwrap();
+        let first = rx.blocking_recv().unwrap();
         assert_eq!(first.kind, "log");
         assert_eq!(first.job_name, "job_a");
         assert_eq!(first.run_id, "run_1");
         assert_eq!(first.level.as_deref(), Some("INFO"));
         assert_eq!(first.message.as_deref(), Some("step one"));
+        // 08-01：捕获侧按 span 分配单调 seq（SSE 去重契约）。
+        assert_eq!(first.seq, Some(1));
 
-        let second = rx.recv().unwrap();
+        let second = rx.blocking_recv().unwrap();
         assert_eq!(second.message.as_deref(), Some("step two with 42"));
         assert_eq!(second.level.as_deref(), Some("WARN"));
+        assert_eq!(second.seq, Some(2));
 
         // 没有第三条事件。
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn test_seq_is_per_span_monotonic_and_restarts_per_run() {
+        let _guard = SUBSCRIBER_LOCK.lock().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let keep_alive = tx.clone();
+        let subscriber = Registry::default().with(JobLogLayer::new(tx));
+        tracing::subscriber::with_default(subscriber, || {
+            for run_id in ["run_1", "run_2"] {
+                let span = tracing::info_span!(
+                    target: "cron_job_log",
+                    "cron_job_run",
+                    job_name = "job_a",
+                    run_id = run_id,
+                );
+                span.in_scope(|| {
+                    tracing::info!("first");
+                    tracing::info!("second");
+                    tracing::info!("third");
+                });
+            }
+        });
+        let seqs: Vec<i32> = (0..6)
+            .map(|_| rx.blocking_recv().unwrap().seq.unwrap())
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3, 1, 2, 3], "每次执行独立从 1 起编");
+        drop(keep_alive);
     }
 
     #[test]
     fn test_ignores_events_outside_job_span() {
         let _guard = SUBSCRIBER_LOCK.lock().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let keep_alive = tx.clone();
         let subscriber = Registry::default().with(JobLogLayer::new(tx));
         tracing::subscriber::with_default(subscriber, || {
@@ -326,17 +370,14 @@ mod tests {
                 tracing::info!("nested but not a job span");
             });
         });
-        assert!(matches!(
-            rx.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
         drop(keep_alive);
     }
 
     #[test]
     fn test_captures_events_nested_inside_job_span() {
         let _guard = SUBSCRIBER_LOCK.lock().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let keep_alive = tx.clone();
         let subscriber = Registry::default().with(JobLogLayer::new(tx));
         tracing::subscriber::with_default(subscriber, || {
@@ -353,7 +394,7 @@ mod tests {
                 });
             });
         });
-        let event = rx.recv().unwrap();
+        let event = rx.blocking_recv().unwrap();
         assert_eq!(event.job_name, "job_b");
         assert_eq!(event.run_id, "run_2");
         assert_eq!(event.message.as_deref(), Some("nested inside job span"));

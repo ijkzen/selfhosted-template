@@ -140,21 +140,42 @@ async fn update_job(
         return response::bad_request(msg);
     }
 
-    let new_expression = req.expression.unwrap_or(model.expression);
+    let expression_changed = req
+        .expression
+        .as_deref()
+        .is_some_and(|expression| expression != model.expression.as_str());
+    let new_expression = req.expression.clone().unwrap_or(model.expression.clone());
 
+    // 仅表达式实际变更才重算 next_run_at（自当前时刻按新表达式求下一次，与
+    // scheduler 的表达式变更语义一致）；仅改标题/描述/启停的更新不触碰计划——
+    // 无条件重算会在错过执行期把计划悄悄推后。
     let tz = state.settings.timezone().await;
-    let next_run_at = match crate::cron::parser::compute_next_run_tz(&new_expression, tz) {
-        Ok(next) => next,
-        Err(e) => {
-            let msg = if lang == Lang::En {
-                format!("invalid expression: {e}")
-            } else {
-                format!("表达式无效：{e}")
-            };
-            return response::bad_request(msg);
+    let next_run_at = if expression_changed {
+        match crate::cron::parser::compute_next_run_tz(&new_expression, tz) {
+            Ok(next) => next,
+            Err(e) => {
+                let msg = if lang == Lang::En {
+                    format!("invalid expression: {e}")
+                } else {
+                    format!("表达式无效：{e}")
+                };
+                return response::bad_request(msg);
+            }
         }
+    } else {
+        model.next_run_at
     };
 
+    // 记录旧定义：内存更新失败时用它回写 DB，避免「列表显示旧值、库里是新值」
+    // 的分叉（列表的 title/expression/enabled 取自内存）。
+    let previous = JobDefinition {
+        name: model.name.clone(),
+        title: model.title.clone(),
+        description: model.description.clone(),
+        expression: model.expression.clone(),
+        enabled: model.enabled,
+        group: model.group.clone(),
+    };
     let definition = JobDefinition {
         name: name.clone(),
         title: req.title.unwrap_or(model.title),
@@ -187,6 +208,16 @@ async fn update_job(
         .update_job_in_memory(&name, &definition)
         .await
     {
+        // 回写旧定义（含原 next_run_at），保持 DB 与内存一致。
+        if let Err(rollback_err) = repo
+            .update_job_full(&name, &previous, model.last_run_at, model.next_run_at)
+            .await
+        {
+            tracing::error!(
+                job_name = %name,
+                "调度器内存更新失败后回写 DB 亦失败，状态可能分叉：{rollback_err}"
+            );
+        }
         return response::scheduler_error(scheduler_error_status(&e), e.to_string());
     }
 
@@ -321,6 +352,10 @@ async fn stream_job_logs(
 ) -> impl IntoResponse {
     let log_repo = SeaOrmCronJobLogRepository::new(state.db.clone());
 
+    // 先订阅再读库快照：快照与订阅之间产生的日志事件已入广播环，会随实时流
+    // 送达（与快照重叠部分前端按 seq 去重）；反向顺序会永久丢失该窗口。
+    let rx = state.log_tx.subscribe();
+
     let initial = match log_repo.list_runs(&name, 1).await {
         Ok(runs) => match runs.into_iter().next() {
             Some(run) if run.status == "running" => {
@@ -344,7 +379,6 @@ async fn stream_job_logs(
         Err(_) => SseEvent::default().event("idle").data("{}"),
     };
 
-    let rx = state.log_tx.subscribe();
     let updates = BroadcastStream::new(rx).filter_map(move |result| {
         let event = match result {
             Ok(event) if event.job_name == name => {

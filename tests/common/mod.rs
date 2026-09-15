@@ -30,11 +30,11 @@ const TEST_COOKIE: &str = "session=itest-session-token-0123456789abcdef";
 pub async fn setup_db_and_scheduler() -> (
     DatabaseConnection,
     SchedulerRuntime,
-    tokio::sync::broadcast::Sender<JobLogEvent>,
+    tokio::sync::broadcast::Sender<std::sync::Arc<JobLogEvent>>,
 ) {
     let db = db::connect("sqlite::memory:").await.unwrap();
 
-    let (log_tx, _) = tokio::sync::broadcast::channel::<JobLogEvent>(64);
+    let (log_tx, _) = tokio::sync::broadcast::channel::<std::sync::Arc<JobLogEvent>>(64);
     let worker = JobWorker::new(db.clone(), 2, 100, log_tx.clone());
     let handle = worker.start();
 
@@ -47,7 +47,7 @@ pub async fn setup_db_and_scheduler() -> (
 pub fn build_app(
     db: DatabaseConnection,
     scheduler: SchedulerRuntime,
-    log_tx: tokio::sync::broadcast::Sender<JobLogEvent>,
+    log_tx: tokio::sync::broadcast::Sender<std::sync::Arc<JobLogEvent>>,
     settings: AppSettings,
 ) -> axum::Router {
     let state = AppState {
@@ -64,7 +64,7 @@ pub fn build_app(
 pub async fn build_app_loaded(
     db: DatabaseConnection,
     scheduler: SchedulerRuntime,
-    log_tx: tokio::sync::broadcast::Sender<JobLogEvent>,
+    log_tx: tokio::sync::broadcast::Sender<std::sync::Arc<JobLogEvent>>,
 ) -> axum::Router {
     let settings = AppSettings::load_from_db(&db).await.unwrap();
     build_app(db, scheduler, log_tx, settings)
@@ -113,7 +113,7 @@ async fn inject_test_auth(mut req: Request, next: Next) -> Response {
 pub async fn build_authed_app(
     db: DatabaseConnection,
     scheduler: SchedulerRuntime,
-    log_tx: tokio::sync::broadcast::Sender<JobLogEvent>,
+    log_tx: tokio::sync::broadcast::Sender<std::sync::Arc<JobLogEvent>>,
 ) -> axum::Router {
     seed_default_auth(&db).await;
     build_app_loaded(db, scheduler, log_tx)

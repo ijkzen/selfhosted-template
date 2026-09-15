@@ -76,16 +76,6 @@ pub trait CronJobLogRepository: Send + Sync + Clone {
         truncated: bool,
     ) -> Result<bool, DbErr>;
 
-    /// 追加一条日志。
-    async fn insert_log(
-        &self,
-        run_id: &str,
-        seq: i32,
-        level: &str,
-        message: &str,
-        ts: DateTime<Utc>,
-    ) -> Result<(), DbErr>;
-
     /// 最近 `limit` 次执行（按开始时间倒序，最新在前）。
     async fn list_runs(&self, job_name: &str, limit: u64) -> Result<Vec<RunRecord>, DbErr>;
 
@@ -94,6 +84,10 @@ pub trait CronJobLogRepository: Send + Sync + Clone {
 
     /// 进程启动时把残留的 running 执行标记为 failed（服务重启导致中断）。
     async fn mark_interrupted_runs_failed(&self) -> Result<u64, DbErr>;
+
+    /// 删除无 run 归属的孤儿日志（run 行创建失败等历史原因残留，prune 从 run
+    /// 表倒推删不到它们）。
+    async fn delete_orphan_logs(&self) -> Result<u64, DbErr>;
 
     /// 清理超出 `keep` 次之外的旧执行及其日志。
     async fn prune_old_runs(&self, job_name: &str, keep: u64) -> Result<(), DbErr>;
@@ -104,9 +98,39 @@ pub struct SeaOrmCronJobLogRepository {
     db: DatabaseConnection,
 }
 
+/// 待批量写入的一行日志。
+pub struct LogRow {
+    pub seq: i32,
+    pub level: String,
+    pub message: String,
+    pub ts: DateTime<Utc>,
+}
+
 impl SeaOrmCronJobLogRepository {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    /// 批量追加日志（单条多值 INSERT，替代逐条 autocommit 往返）。
+    pub async fn insert_logs(&self, run_id: &str, rows: &[LogRow]) -> Result<(), DbErr> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let models = rows
+            .iter()
+            .map(|row| cron_job_log::ActiveModel {
+                run_id: Set(run_id.to_string()),
+                seq: Set(row.seq),
+                level: Set(row.level.clone()),
+                message: Set(row.message.clone()),
+                created_at: Set(row.ts),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        cron_job_log::Entity::insert_many(models)
+            .exec(&self.db)
+            .await?;
+        Ok(())
     }
 }
 
@@ -141,8 +165,11 @@ impl CronJobLogRepository for SeaOrmCronJobLogRepository {
         log_count: i32,
         truncated: bool,
     ) -> Result<bool, DbErr> {
+        // 仅 running 态可终态化（08-06）：6h 超时回收已把超长执行标 failed 时，
+        // 真正结束的回写不再覆盖成 success（避免 DB 出现 failed→success 中间态）。
         let result = cron_job_run::Entity::update_many()
             .filter(cron_job_run::Column::RunId.eq(run_id))
+            .filter(cron_job_run::Column::Status.eq("running"))
             .set(cron_job_run::ActiveModel {
                 status: Set(status.to_string()),
                 ended_at: Set(Some(ended_at)),
@@ -153,27 +180,6 @@ impl CronJobLogRepository for SeaOrmCronJobLogRepository {
             .exec(&self.db)
             .await?;
         Ok(result.rows_affected > 0)
-    }
-
-    async fn insert_log(
-        &self,
-        run_id: &str,
-        seq: i32,
-        level: &str,
-        message: &str,
-        ts: DateTime<Utc>,
-    ) -> Result<(), DbErr> {
-        cron_job_log::ActiveModel {
-            run_id: Set(run_id.to_string()),
-            seq: Set(seq),
-            level: Set(level.to_string()),
-            message: Set(message.to_string()),
-            created_at: Set(ts),
-            ..Default::default()
-        }
-        .insert(&self.db)
-        .await?;
-        Ok(())
     }
 
     async fn list_runs(&self, job_name: &str, limit: u64) -> Result<Vec<RunRecord>, DbErr> {
@@ -208,34 +214,74 @@ impl CronJobLogRepository for SeaOrmCronJobLogRepository {
         Ok(result.rows_affected)
     }
 
+    async fn delete_orphan_logs(&self) -> Result<u64, DbErr> {
+        use sea_orm::ConnectionTrait;
+
+        let result = self
+            .db
+            .execute_unprepared(
+                "DELETE FROM cron_job_logs WHERE run_id NOT IN (SELECT run_id FROM cron_job_runs)",
+            )
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     async fn prune_old_runs(&self, job_name: &str, keep: u64) -> Result<(), DbErr> {
+        // 回收本 job 卡死超时的 running：finish_run 失败（进程活着但落库失败）
+        // 会让 run 永久停在 running，靠本函数随每次执行收尾兜底（本函数随每次
+        // 执行结束调用，回收频率跟随任务自身周期）。阈值 6h 避免误伤合法长任务。
+        cron_job_run::Entity::update_many()
+            .filter(cron_job_run::Column::JobName.eq(job_name))
+            .filter(cron_job_run::Column::Status.eq("running"))
+            .filter(cron_job_run::Column::StartedAt.lt(Utc::now() - chrono::TimeDelta::hours(6)))
+            .set(cron_job_run::ActiveModel {
+                status: Set("failed".to_string()),
+                ended_at: Set(Some(Utc::now())),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await?;
+
+        // 只取 keep+1 行判阈值：不整表拉全量再 Rust 端 skip（S6）。
         let runs = cron_job_run::Entity::find()
             .filter(cron_job_run::Column::JobName.eq(job_name))
             .order_by_desc(cron_job_run::Column::StartedAt)
+            .limit(keep + 1)
             .all(&self.db)
             .await?;
         if runs.len() <= keep as usize {
             return Ok(());
         }
-        let old_run_ids: Vec<String> = runs
+        // 保留区内最旧一条的 started_at 即清理阈值：删严格更旧的执行。
+        let cutoff = runs[keep as usize - 1].started_at;
+
+        // 事务外先取应删 run_id：事务首语句必须是写（WAL 下事务内先读后写、
+        // 读快照期间他连接提交过时首次写升级报 database is locked；本函数随
+        // 每次任务执行触发，与 /v1 流量写并发）。
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT run_id FROM cron_job_runs WHERE job_name = ? AND started_at < ?",
+                [job_name.to_string().into(), cutoff.into()],
+            ))
+            .await?;
+        let ids: Vec<String> = rows
             .into_iter()
-            .skip(keep as usize)
-            .map(|run| run.run_id)
+            .filter_map(|row| row.try_get::<String>("", "run_id").ok())
             .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
 
         let txn = self.db.begin().await?;
         cron_job_log::Entity::delete_many()
-            .filter(
-                cron_job_log::Column::RunId
-                    .is_in(old_run_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
-            )
+            .filter(cron_job_log::Column::RunId.is_in(ids.iter().map(|s| s.as_str())))
             .exec(&txn)
             .await?;
         cron_job_run::Entity::delete_many()
-            .filter(
-                cron_job_run::Column::RunId
-                    .is_in(old_run_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
-            )
+            .filter(cron_job_run::Column::RunId.is_in(ids.iter().map(|s| s.as_str())))
             .exec(&txn)
             .await?;
         txn.commit().await?;
@@ -275,15 +321,31 @@ mod tests {
     async fn test_insert_and_list_logs() {
         let db = setup_db().await;
         let repo = SeaOrmCronJobLogRepository::new(db);
-        repo.insert_log("run-b", 1, "INFO", "first", Utc::now())
-            .await
-            .unwrap();
-        repo.insert_log("run-b", 2, "WARN", "second", Utc::now())
-            .await
-            .unwrap();
-        repo.insert_log("run-b", 3, "ERROR", "third", Utc::now())
-            .await
-            .unwrap();
+        repo.insert_logs(
+            "run-b",
+            &[
+                LogRow {
+                    seq: 1,
+                    level: "INFO".to_string(),
+                    message: "first".to_string(),
+                    ts: Utc::now(),
+                },
+                LogRow {
+                    seq: 2,
+                    level: "WARN".to_string(),
+                    message: "second".to_string(),
+                    ts: Utc::now(),
+                },
+                LogRow {
+                    seq: 3,
+                    level: "ERROR".to_string(),
+                    message: "third".to_string(),
+                    ts: Utc::now(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
 
         let logs = repo.list_logs("run-b").await.unwrap();
         assert_eq!(logs.len(), 3);
@@ -301,9 +363,17 @@ mod tests {
             repo.insert_run(&run_id, "job_prune", base + chrono::TimeDelta::seconds(i))
                 .await
                 .unwrap();
-            repo.insert_log(&run_id, 1, "INFO", &format!("log {i}"), base)
-                .await
-                .unwrap();
+            repo.insert_logs(
+                &run_id,
+                &[LogRow {
+                    seq: 1,
+                    level: "INFO".to_string(),
+                    message: format!("log {i}"),
+                    ts: base,
+                }],
+            )
+            .await
+            .unwrap();
         }
 
         repo.prune_old_runs("job_prune", 2).await.unwrap();
@@ -346,6 +416,72 @@ mod tests {
         assert_eq!(runs[0].status, "failed");
     }
 
+    #[tokio::test]
+    async fn test_delete_orphan_logs_removes_rows_without_run() {
+        let db = setup_db().await;
+        let repo = SeaOrmCronJobLogRepository::new(db);
+        repo.insert_run("run-a", "job_a", Utc::now()).await.unwrap();
+        repo.insert_logs(
+            "run-a",
+            &[LogRow {
+                seq: 1,
+                level: "INFO".to_string(),
+                message: "belongs to run".to_string(),
+                ts: Utc::now(),
+            }],
+        )
+        .await
+        .unwrap();
+        // 无 run 归属的孤儿行（insert_run 失败仍写日志的旧缺陷产物）。
+        repo.insert_logs(
+            "orphan-1",
+            &[LogRow {
+                seq: 1,
+                level: "WARN".to_string(),
+                message: "orphan".to_string(),
+                ts: Utc::now(),
+            }],
+        )
+        .await
+        .unwrap();
+        repo.insert_logs(
+            "orphan-2",
+            &[LogRow {
+                seq: 1,
+                level: "WARN".to_string(),
+                message: "orphan".to_string(),
+                ts: Utc::now(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let affected = repo.delete_orphan_logs().await.unwrap();
+        assert_eq!(affected, 2);
+        assert_eq!(repo.list_logs("run-a").await.unwrap().len(), 1);
+        assert!(repo.list_logs("orphan-1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_prune_marks_stale_running_failed_but_keeps_fresh() {
+        let db = setup_db().await;
+        let repo = SeaOrmCronJobLogRepository::new(db);
+        let now = Utc::now();
+        repo.insert_run("stale", "job_sweep", now - chrono::TimeDelta::hours(7))
+            .await
+            .unwrap();
+        repo.insert_run("fresh", "job_sweep", now).await.unwrap();
+
+        repo.prune_old_runs("job_sweep", 30).await.unwrap();
+
+        let runs = repo.list_runs("job_sweep", 10).await.unwrap();
+        let stale = runs.iter().find(|r| r.run_id == "stale").unwrap();
+        assert_eq!(stale.status, "failed");
+        assert!(stale.ended_at.is_some());
+        let fresh = runs.iter().find(|r| r.run_id == "fresh").unwrap();
+        assert_eq!(fresh.status, "running", "未超时的 running 不应被回收");
+    }
+
     #[test]
     fn test_run_record_serializable_shape() {
         // 防止意外改动 JobLogEvent 的字段影响 SSE 契约。
@@ -363,5 +499,55 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"kind\":\"log\""));
         assert!(json.contains("\"job_name\":\"j\""));
+    }
+    /// 08-09：大批次插入（>50 行）参数边界——单条多值 INSERT 不应触 SQLite 变量上限。
+    #[tokio::test]
+    async fn test_insert_many_large_batch() {
+        let db = setup_db().await;
+        let repo = SeaOrmCronJobLogRepository::new(db);
+        repo.insert_run("run-big", "job_big", Utc::now())
+            .await
+            .unwrap();
+        let base = Utc::now();
+        let rows: Vec<LogRow> = (0..300)
+            .map(|i| LogRow {
+                seq: i,
+                level: "INFO".to_string(),
+                message: format!("log {i}"),
+                ts: base,
+            })
+            .collect();
+        repo.insert_logs("run-big", &rows).await.unwrap();
+        let logs = repo.list_logs("run-big").await.unwrap();
+        assert_eq!(logs.len(), 300, "300 行应全部落库");
+        assert_eq!(logs[0].seq, 0, "按 seq 升序返回");
+        assert_eq!(logs[299].seq, 299);
+    }
+
+    /// 08-06：6h 回收把超长执行标 failed 后，正常结束的回写不得覆盖成 success。
+    #[tokio::test]
+    async fn test_finish_run_does_not_overwrite_reclaimed_failed_run() {
+        let db = setup_db().await;
+        let repo = SeaOrmCronJobLogRepository::new(db);
+        // 造一条 started_at 早于 6h 的 running 执行。
+        let old = Utc::now() - chrono::TimeDelta::hours(7);
+        repo.insert_run("run-stuck", "job_stuck", old)
+            .await
+            .unwrap();
+        // prune 触发 6h 回收 → 标 failed。
+        repo.prune_old_runs("job_stuck", MAX_RUNS_KEPT)
+            .await
+            .unwrap();
+        let runs = repo.list_runs("job_stuck", 10).await.unwrap();
+        assert_eq!(runs[0].status, "failed", "超时应被回收标 failed");
+
+        // 任务此刻才真正结束：回写不得把 failed 改成 success（08-06 守卫）。
+        let changed = repo
+            .finish_run("run-stuck", "success", Utc::now(), 3, false)
+            .await
+            .unwrap();
+        assert!(!changed, "非 running 态不应被终态化覆盖");
+        let runs = repo.list_runs("job_stuck", 10).await.unwrap();
+        assert_eq!(runs[0].status, "failed", "状态保持 failed");
     }
 }

@@ -35,8 +35,12 @@ pub fn default_description(name: &str, lang: crate::i18n::Lang) -> String {
 
 /// 确保 `example` 任务行存在（不存在则插入，幂等）。
 pub async fn ensure_example_job(db: &DatabaseConnection) -> anyhow::Result<()> {
+    ensure_job(db, EXAMPLE_JOB, "@every 1h").await
+}
+
+async fn ensure_job(db: &DatabaseConnection, name: &str, expression: &str) -> anyhow::Result<()> {
     let exists = cron_job::Entity::find()
-        .filter(cron_job::Column::Name.eq(EXAMPLE_JOB))
+        .filter(cron_job::Column::Name.eq(name))
         .one(db)
         .await?;
     if exists.is_some() {
@@ -44,15 +48,18 @@ pub async fn ensure_example_job(db: &DatabaseConnection) -> anyhow::Result<()> {
     }
     let now = chrono::Utc::now();
     let lang = crate::i18n::Lang::default();
+    // next_run_at 按表达式计算：写成 now 会让 @hourly 任务在首跑前展示
+    // 「下次运行 = 过去的时刻」数小时。计算失败兜底 now（展示偏差不阻塞种子）。
+    let next_run_at = super::parser::compute_next_run_tz(expression, None).unwrap_or(now);
     cron_job::ActiveModel {
-        name: Set(EXAMPLE_JOB.to_string()),
-        title: Set(default_title(EXAMPLE_JOB, lang)),
-        description: Set(default_description(EXAMPLE_JOB, lang)),
-        expression: Set("@every 1h".to_string()),
+        name: Set(name.to_string()),
+        title: Set(default_title(name, lang)),
+        description: Set(default_description(name, lang)),
+        expression: Set(expression.to_string()),
         enabled: Set(true),
         group: Set("system".to_string()),
         last_run_at: Set(now),
-        next_run_at: Set(now),
+        next_run_at: Set(next_run_at),
         created_at: Set(now),
         updated_at: Set(now),
         is_deleted: Set(false),
@@ -60,7 +67,7 @@ pub async fn ensure_example_job(db: &DatabaseConnection) -> anyhow::Result<()> {
     }
     .insert(db)
     .await?;
-    tracing::info!("已创建内置定时任务 {EXAMPLE_JOB}（每小时）");
+    tracing::info!(name, expression, "已创建内置定时任务");
     Ok(())
 }
 
