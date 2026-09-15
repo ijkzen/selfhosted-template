@@ -8,6 +8,7 @@ const en: Translation = {
 		confirm: "Confirm",
 		cancel: "Cancel",
 		save: "Save",
+		create: "Create",
 		edit: "Edit",
 		delete: "Delete",
 		refresh: "Refresh",
@@ -111,6 +112,8 @@ const en: Translation = {
 		realTimeLogs: "Live logs",
 		runningEllipsis: "Running…",
 		reconnecting: "Connection lost, reconnecting…",
+		reconnectFailed:
+			"Live connection stopped after repeated reconnect failures; refresh the page to retry",
 		noActiveRun: "No job is currently running",
 		runEnded: "Execution",
 		endedAtLabel: "ended at",
@@ -177,6 +180,9 @@ const en: Translation = {
 	},
 	error: {
 		missingData: "Missing data",
+		networkError: "Network request failed",
+		timeout: "Request timed out: {{method}} {{url}}",
+		aborted: "Request cancelled",
 	},
 	notFound: {
 		title: "Page not found",

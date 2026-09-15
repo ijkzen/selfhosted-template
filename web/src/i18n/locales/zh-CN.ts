@@ -6,6 +6,7 @@ const zhCN = {
 		confirm: "确认",
 		cancel: "取消",
 		save: "保存",
+		create: "创建",
 		edit: "编辑",
 		delete: "删除",
 		refresh: "刷新",
@@ -109,6 +110,7 @@ const zhCN = {
 		realTimeLogs: "实时日志",
 		runningEllipsis: "执行中…",
 		reconnecting: "连接断开，正在重连…",
+		reconnectFailed: "实时连接已中断（多次重连失败），请刷新页面后重试",
 		noActiveRun: "当前没有正在执行的任务",
 		runEnded: "执行",
 		endedAtLabel: "结束于",
@@ -175,6 +177,9 @@ const zhCN = {
 	},
 	error: {
 		missingData: "数据缺失",
+		networkError: "网络请求失败",
+		timeout: "请求超时：{{method}} {{url}}",
+		aborted: "请求已取消",
 	},
 	notFound: {
 		title: "页面不存在",
