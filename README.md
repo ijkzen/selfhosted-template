@@ -13,6 +13,7 @@
 - **设置**：键值设置表（类型化校验），内置语言与时区两项；语言切换前后端同步，时区变更重建全部定时任务。
 - **双语 i18n**：后端消息与前端界面同源双语（zh-CN / en），中英键集合一致性由测试锁定。
 - **统一响应与错误**：`{code, msg, data}` 信封，前端错误文案统一映射（超时/网络/取消），401 自动跳登录并在登录后回跳原页面。
+- **飞书通知**：定时任务执行失败时推送飞书消息；渠道配置加密落库、凭据掩码回显、测试发送、扫码一键创建自建应用（设备授权码流程）。
 - **加密与掩码**：`SECRET_KEY` 驱动的 AES-256-GCM 加解密与安全掩码工具，供新业务存储敏感字段。
 - **工程化**：SQLite WAL + 版本化迁移、结构化 JSON 日志与定期清理、优雅关停（收尾超时）、CI 门禁（fmt + clippy + test + biome + vitest + build）、版本化 pre-commit 钩子。
 
@@ -92,9 +93,9 @@ docker compose up -d --build
 
 ```bash
 cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets          # 后端 125 项
+cargo test --all-targets          # 后端 163 项
 
-cd web && pnpm lint && pnpm test run   # 前端 54 项
+cd web && pnpm lint && pnpm test run   # 前端 64 项
 ```
 
 提交前请跑完整门禁，或安装版本化钩子自动执行：

@@ -48,6 +48,8 @@
 | E3 | 补 README 与 `docs/user-guide.md` | E | 已完成 |
 | E4 | 沉淀审计方法论 `docs/agents/audit.md` | E | 已完成 |
 | E5 | `.gitignore` 补 ZCode 工作目录；pre-commit 纳入版本控制 | E | 已完成 |
+| N1 | 飞书通知能力整体移植（渠道层 + 扫码注册 + 配置 UI） | N | 已完成 |
+| N2 | 触发点改判：供应商转换 → 定时任务失败（业务无关化） | N | 已完成 |
 
 ## 分项明细
 
@@ -155,6 +157,25 @@ worker 测试的固定预算 `sleep(300ms)` 全部换成 `wait_for_run` 轮询 h
 
 **E5 工作目录与钩子**：`.gitignore` 补 `/.worktrees`、`/.zcode/plans`、`/.zcode/tmp`；pre-commit 落为版本控制的 `scripts/pre-commit.sh`（检查项与 CI 对齐，含 `cargo fmt --check` 与 `cargo test --all-targets`），并把 `.git/hooks/pre-commit` 换成指向它的软链，本地与 CI 从此同源。
 
+### 批次 N：飞书通知能力（2026-09-18）
+
+**N1 渠道层整体移植**（gateway `src/notification/`、`src/routes/notification.rs`、`entity/notification_channel.rs`、`web/src/{lib/notification.ts,hooks/use-notification.ts,components/settings/NotificationDialog.tsx}`）
+
+llm-gateway 的飞书通知是一套完整能力：渠道配置（整段 AES-256-GCM 加密落库、掩码回显、缺省 appSecret 沿用原值）、自研 HTTP 客户端（取 `tenant_access_token` + 发文本消息，错误码映射中文提示）、扫码一键创建自建应用（OAuth 2.0 Device Authorization Grant，含 `slow_down` 退避与 400 响应体解析）、测试发送、配置弹窗 UI。
+
+移植时的**必要适配**（不照抄的部分）：
+
+1. **触发点改判（N2）**：gateway 的 `notify.rs` 是「供应商可用性自动转换」通知，属业务专属。模板里业务无关的「后台自动干活」只有定时任务引擎，故重写为**任务失败通知**：`render_failure` + `spawn_failure` + `notify_failure`，触发点挂在 `cron::worker::execute_with_logging` 的 run 收尾（落成 `failed` 后 `spawn`，不阻塞调度推进）。新项目照此模块加 `render_*`/`spawn_*` 接入自己的业务事件。
+2. **`decrypt_or_passthrough` 不引入**：模板 `crypto::decrypt` 返回 `Result`，`decode_config` 直接 `.ok()?` 即得「解不开按未配置处理」语义（B4 的改判在此得到最终处置：仍不需要该包装函数）。
+3. **校验消息双语化**：`FeishuConfig::validate` / `save_channel` / `send_test` 收 `Lang` 参数，走 `lang.tr(zh, en)`，与模板其余路由消息口径一致；上游技术诊断（`飞书未返回 device_code` 之类）保持中文原样，与 `db_error` 同类。
+4. **通知正文双语化 + 时区跟随设置**：`render_failure` 的标题/标签/分隔符都随 `Lang` 变化，时间用 `AppSettings::timezone()`（无 `timezone_sync` 全局，改由 `spawn_failure` 内部读 `AppSettings` 句柄）。
+5. **测试重定向变量改名**：`LLM_GATEWAY_FEISHU_BASE_URL` → `FEISHU_BASE_URL`。
+6. **迁移编号**：gateway migration 27 → 模板 migration 7。
+7. **`backup.rs` 集成测试不搬**：模板没有备份功能。
+8. **新增依赖**：`reqwest`（`default-features = false, features = ["json", "rustls-tls"]`，gateway 多带 `cookies`，模板用不到）、前端 `qrcode.react`。
+
+**批次 N 验证**：`cargo fmt --check` 干净；`cargo clippy --all-targets --all-features -- -D warnings` 无告警；`cargo test --all-targets` 163 项全绿（128 单元 + 35 集成，其中 notification 20 项）；`tsc -b` 与 `biome check` 无问题；`vitest run` 20 文件 64 项全通过；`vite build` 成功。
+
 ## 提交记录
 
 按批次分 6 次提交（每次提交前跑完整门禁）：
@@ -167,8 +188,11 @@ worker 测试的固定预算 `sleep(300ms)` 全部换成 `wait_for_run` 轮询 h
 | `f43c59d` | F | 前端错误链路保留错误身份并统一用户可见文案 |
 | `2cdc6f2` | FE | i18n 首帧与热切换、SSE 退避重连、页面刷新语义 |
 | `e3fc092` | E | CI fmt 门禁与工程文档（README/使用手册/审计规范/pre-commit 脚本） |
+| `195a507` | N | 飞书通知渠道与定时任务失败通知（+ 紧随的 `docs:` 提交：ADR-0002 与文档同步） |
 
 **B1 与批次 C 合并提交的原因**：cron 日志事件的 `Arc` 化同时改动 `lib.rs`、`state.rs`、`log_capture.rs`、`worker.rs`、`routes/cron_jobs.rs`，而 B1 的优雅关停也落在 `lib.rs`——两者无法拆到不同提交而不让中间提交无法编译。
+
+**批次 N 分两次提交的原因**：代码与其配套文档（ADR-0002、CONTEXT 词条、AGENTS/README/user-guide 的结构树与计数）分开，便于文档单独修订。
 
 ## 整体验证
 

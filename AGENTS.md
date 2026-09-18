@@ -2,13 +2,13 @@
 
 ## 项目概述
 
-通用单用户自托管后台模板：Rust（axum + SeaORM + SQLite）单体 + React 管理后台，前端产物由 `rust-embed` 内嵌进二进制。内置登录会话、设置（语言/时区）、定时任务引擎（含执行日志 SSE）、双语 i18n 与示例域 Notes。新项目以此起步，把 Notes 换成自己的业务域即可。
+通用单用户自托管后台模板：Rust（axum + SeaORM + SQLite）单体 + React 管理后台，前端产物由 `rust-embed` 内嵌进二进制。内置登录会话、设置（语言/时区）、定时任务引擎（含执行日志 SSE）、飞书通知、双语 i18n 与示例域 Notes。新项目以此起步，把 Notes 换成自己的业务域即可。
 
 决策记录见 `docs/adr/`，域词汇见 `CONTEXT.md`，来源与边界见 `docs/adr/0001-template-from-llm-gateway.md`。
 
 ## 技术栈
 
-**后端**：axum 0.8、SeaORM 2（sqlite）、tokio、tower-http（CORS/trace/catch-panic）、argon2id、aes-gcm、croner（cron 表达式）、tracing（结构化 JSON 日志）、rust-embed。
+**后端**：axum 0.8、SeaORM 2（sqlite）、tokio、tower-http（CORS/trace/catch-panic）、argon2id、aes-gcm、croner（cron 表达式）、reqwest（飞书 HTTP 客户端）、tracing（结构化 JSON 日志）、rust-embed。
 
 **前端**：React 19 + TypeScript（严格模式）、Vite、Tailwind CSS、shadcn/ui（Radix）、TanStack Query、Zustand、react-i18next、ky、zod。
 
@@ -20,9 +20,10 @@ src/
 ├── lib.rs               # init/run、tracing 装配、优雅关停
 ├── config/              # 环境变量解析与校验
 ├── db.rs                # 连接配置（WAL）+ 迁移
-├── entity/              # SeaORM 实体（user/session/setting/cron_job*/note）
+├── entity/              # SeaORM 实体（user/session/setting/cron_job*/note/notification_channel）
 ├── auth/                # 密码哈希、会话、鉴权中间件
 ├── crypto/              # SECRET_KEY 加解密与掩码
+├── notification/        # 飞书通知（feishu 客户端/渠道配置/扫码注册/notify 触发）
 ├── app_settings.rs      # 语言/时区进程内缓存
 ├── i18n.rs              # 后端双语消息
 ├── response.rs          # 统一响应信封与错误 helper
@@ -30,7 +31,7 @@ src/
 ├── static_assets/       # rust-embed 静态资源与 SPA fallback
 ├── logs_cleanup.rs      # 日志目录定期清理
 ├── cron/                # 定时任务引擎（parser/repository/scheduler/worker/log*）
-└── routes/              # HTTP 路由（auth/cron_jobs/notes/settings）
+└── routes/              # HTTP 路由（auth/cron_jobs/notes/notification/settings）
 web/src/
 ├── main.tsx  App.tsx    # 入口与路由
 ├── pages/               # 页面
@@ -89,10 +90,11 @@ cargo run
 
 ## 测试说明
 
-- **后端**：`cargo test --all-targets`。125 项：`src/` 单元测试 110 项（config、crypto、db 迁移与 `ensure_columns`、app_settings、auth、cron（parser/scheduler/worker/log_capture/log_repository/seed）、logs_cleanup、routes 等）+ `tests/` 集成测试 15 项（auth 6、cron_jobs 8、notes 1）。
+- **后端**：`cargo test --all-targets`。163 项：`src/` 单元测试 128 项（config、crypto、db 迁移与 `ensure_columns`、app_settings、auth、cron（parser/scheduler/worker/log_capture/log_repository/seed）、notification（feishu/渠道配置/register/notify）、logs_cleanup、routes 等）+ `tests/` 集成测试 35 项（auth 6、cron_jobs 8、notes 1、notification 20）。
 - 依赖全局 tracing subscriber 的测试（`cron::log_capture` 与 worker 日志链路）用 `SUBSCRIBER_LOCK` 串行执行；worker 日志测试须用 `current_thread` runtime（`set_default` 是线程局部的）。
 - 环境变量隔离用 `temp-env`，临时目录用 `tempfile`；关停测试用 `tokio` 的 `test-util`（`start_paused` 虚拟时钟）。
-- **前端**：`cd web && pnpm test run`。19 个文件 54 项，分布于 `src/__tests__/`（页面级）、`src/components/__tests__/`、`src/hooks/__tests__/`、`src/lib/__tests__/`（api）、`src/i18n/__tests__/`（中英键集合一致性 + 源码 `t()` 引用存在性）。
+- 飞书发送/注册类集成测试由本地 mock 飞书经 `FEISHU_BASE_URL` 重定向基址，因该变量是进程级全局，用 `SEND_LOCK` 串行执行（同 `SUBSCRIBER_LOCK` 的处置）。
+- **前端**：`cd web && pnpm test run`。20 个文件 64 项，分布于 `src/__tests__/`（页面级）、`src/components/__tests__/`、`src/hooks/__tests__/`、`src/lib/__tests__/`（api）、`src/i18n/__tests__/`（中英键集合一致性 + 源码 `t()` 引用存在性）。
 - `web/src/test/setup.ts` 为 Node 26 与 jsdom 的全局 `localStorage` 冲突做了内存 polyfill，并为 `ResizeObserver`/`scrollIntoView`/`matchMedia` 补了 jsdom 缺失的桩。
 - 没有 E2E 测试。
 
@@ -144,6 +146,9 @@ cd web && pnpm test run            # 前端全量测试
 5. **Biome 配置**：`web/biome.json`（tab 缩进、双引号、100 列）。
 6. **健康检查**：`/api/healthz` 只表示进程存活，不检查数据库等依赖。
 7. **未知 API 路径返回 JSON 404**（`/api/` 前缀），其余路径回退 SPA 静态资源。
+8. **飞书通知的触发点在 worker 收尾**：任务失败通知由 `cron::worker::execute_with_logging` 在 run 落成 `failed` 后 `spawn` 出去，渠道未配置/已停用时静默跳过。新项目接入自己的业务事件时照 `src/notification/notify.rs` 加一个 `render_*` + `spawn_*`，不要改渠道层。
+9. **`FEISHU_BASE_URL` 仅供测试**：非空时替换飞书基址（集成测试的 mock 服务器用），生产不要设置。
+10. **扫码注册会话是内存态单槽位**：重启即丢，同一时刻只允许一个进行中的扫码会话（新 `begin` 替换旧的）。
 
 ## Agent skills
 
