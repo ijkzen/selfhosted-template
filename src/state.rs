@@ -15,4 +15,6 @@ pub struct AppState {
     pub log_tx: broadcast::Sender<Arc<JobLogEvent>>,
     /// 语言/时区设置缓存（设置页更新后热刷新）。
     pub settings: AppSettings,
+    /// 飞书扫码创建的注册会话槽（单槽位，内存态，见 `notification::register`）。
+    pub feishu_registration: crate::notification::register::RegistrationSlot,
 }

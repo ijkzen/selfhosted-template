@@ -263,6 +263,8 @@ async fn execute_with_logging(
     };
 
     let status = if result.is_ok() { "success" } else { "failed" };
+    // 通知文案取原始错误串（下面的 `if let Err` 会 move 掉 result）。
+    let failure_reason = result.as_ref().err().map(ToString::to_string);
 
     if let Err(e) = result {
         tracing::error!("Job '{}' failed: {}", name, e);
@@ -308,6 +310,12 @@ async fn execute_with_logging(
         ended_at,
         sink.truncated,
     )));
+
+    // 失败通知放在 run 收尾之后（未配置/已停用时静默跳过）：发送是 spawn 出去的，
+    // 不阻塞调度推进。
+    if let Some(reason) = failure_reason {
+        crate::notification::notify::spawn_failure(&db, &settings, &name, &reason);
+    }
 
     let repo = SeaOrmCronJobRepository::new(db);
     // 计划推进（next_run/last_run 回写）唯一实现在 scheduler::on_run_finished：

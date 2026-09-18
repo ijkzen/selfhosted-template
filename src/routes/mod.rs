@@ -1,6 +1,7 @@
 mod auth;
 mod cron_jobs;
 mod notes;
+mod notification;
 mod settings;
 
 use axum::Json;
@@ -21,6 +22,7 @@ pub fn create_app(state: &AppState) -> Router {
         .nest("/api/auth", auth::routes())
         .nest("/api/cron-jobs", cron_jobs::routes())
         .nest("/api/notes", notes::routes())
+        .nest("/api/notification", notification::routes())
         .nest("/api/settings", settings::routes())
         .fallback(api_aware_fallback)
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))

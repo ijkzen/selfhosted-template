@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageHeaderSkeleton } from "@/components/page-header-skeleton";
 import { SearchInput } from "@/components/search-input";
 import { ChangePasswordDialog } from "@/components/settings/ChangePasswordDialog";
+import { NotificationDialog } from "@/components/settings/NotificationDialog";
 import { SettingDeleteDialog } from "@/components/settings/SettingDeleteDialog";
 import { SettingEditDialog } from "@/components/settings/SettingEditDialog";
 import { SettingsTable } from "@/components/settings/SettingsTable";
@@ -19,7 +20,7 @@ import {
 import { type Setting, useSettings } from "@/hooks/use-settings";
 import { SETTING_TYPES } from "@/lib/constants";
 import { SETTINGS_PAGE } from "@/lib/pages";
-import { KeyRound } from "lucide-react";
+import { Bell, KeyRound } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -28,6 +29,7 @@ export default function SettingsPage() {
 	const [editingSetting, setEditingSetting] = useState<Setting | null>(null);
 	const [deletingSetting, setDeletingSetting] = useState<Setting | null>(null);
 	const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+	const [notificationOpen, setNotificationOpen] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [typeFilter, setTypeFilter] = useState("all");
 
@@ -68,6 +70,10 @@ export default function SettingsPage() {
 	return (
 		<div className="space-y-6">
 			<PageHeader icon={SETTINGS_PAGE.icon} title={t(SETTINGS_PAGE.titleKey)}>
+				<Button variant="outline" size="sm" onClick={() => setNotificationOpen(true)}>
+					<Bell className="size-4" />
+					{t("notification.title")}
+				</Button>
 				<Button variant="outline" size="sm" onClick={() => setChangePasswordOpen(true)}>
 					<KeyRound className="size-4" />
 					{t("settings.changePassword")}
@@ -114,6 +120,8 @@ export default function SettingsPage() {
 			/>
 
 			<ChangePasswordDialog open={changePasswordOpen} onOpenChange={setChangePasswordOpen} />
+
+			<NotificationDialog open={notificationOpen} onOpenChange={setNotificationOpen} />
 		</div>
 	);
 }

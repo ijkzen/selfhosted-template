@@ -8,6 +8,7 @@ pub mod entity;
 pub mod i18n;
 pub mod logs_cleanup;
 pub mod middleware;
+pub mod notification;
 pub mod response;
 pub mod routes;
 pub mod state;
@@ -156,6 +157,7 @@ async fn init(config: Config) -> anyhow::Result<AppContext> {
         scheduler,
         log_tx,
         settings,
+        feishu_registration: Default::default(),
     };
 
     Ok(AppContext {

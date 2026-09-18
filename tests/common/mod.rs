@@ -55,6 +55,7 @@ pub fn build_app(
         scheduler,
         log_tx,
         settings,
+        feishu_registration: Default::default(),
     };
     routes::create_app(&state)
 }
